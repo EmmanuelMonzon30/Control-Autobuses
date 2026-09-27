@@ -1,0 +1,18 @@
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+ENV/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+credentials.json
+credentials*.json
+secrets.json
+secrets*.json
+*.pem
+*.key

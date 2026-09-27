@@ -128,7 +128,7 @@ def compute_pi_actuators(
         theta_func=theta_func,
     )
 
-    Fm_cmd, Fb_cmd, Tm_cmd = torque_brake_from_u(u_cmd)
+    Fm_cmd, Fb_cmd, Tm_cmd = torque_brake_from_u(u_cmd, v)
 
     return {
         "u_cmd": float(u_cmd),

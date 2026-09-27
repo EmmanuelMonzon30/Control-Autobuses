@@ -66,9 +66,9 @@ class MPCController:
         u_esc=None,
         du_esc=3000.0,
         alpha_v=5.0,
-        alpha_u=0.05,
-        alpha_du=0.2,
-        du_max=12000.0,
+        alpha_u=0.10,
+        alpha_du=1.0,
+        du_max=6000.0,
     ):
         self.Ts = Ts
         self.Np = Np

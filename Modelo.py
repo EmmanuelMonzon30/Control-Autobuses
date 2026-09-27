@@ -1,42 +1,31 @@
 import numpy as np
 
+
 # =========================================================
 # PARÁMETROS DEL AUTOBÚS
 # =========================================================
-m = 15000.0          # masa [kg]
+m = 15000.0          # masa nominal [kg]
 rho = 1.225          # densidad del aire [kg/m^3]
 A_bus = 8.0          # área frontal [m^2]
 c_a = 0.7            # coeficiente aerodinámico [-]
 c_r = 0.008          # coeficiente de rodadura [-]
-g = 9.81             # gravedad [m/s^2]
+g = 9.81             # aceleración gravitacional [m/s^2]
+
 r_w = 0.5            # radio de la rueda [m]
-M_f = 6.0            # relación final de engrane [-]
+M_f = 6.0            # relación final de transmisión [-]
 eta_t = 0.95         # eficiencia de transmisión [-]
+
 
 # =========================================================
 # COTAS FÍSICAS
 # =========================================================
-T_m_max = 2500.0     # torque máximo [N·m]
-T_m_min = 0.0        # por ahora solo tracción
-F_b_max = 30000.0    # frenado máximo [N]
+T_m_max = 2500.0     # par máximo del motor [N·m]
+T_m_min = 0.0        # únicamente tracción positiva
+
+P_m_max = 250000.0   # potencia mecánica máxima [W]
+
+F_b_max = 30000.0    # fuerza máxima de frenado [N]
 F_b_min = 0.0
-
-
-# =========================================================
-# SATURACIONES
-# =========================================================
-def saturate_torque(Tm: float) -> float:
-    """
-    Satura el torque del motor dentro de sus límites físicos.
-    """
-    return float(np.clip(Tm, T_m_min, T_m_max))
-
-
-def saturate_brake(Fb: float) -> float:
-    """
-    Satura la fuerza de frenado dentro de sus límites físicos.
-    """
-    return float(np.clip(Fb, F_b_min, F_b_max))
 
 
 # =========================================================
@@ -46,29 +35,100 @@ def motor_speed(v: float) -> float:
     """
     Velocidad angular del motor [rad/s].
 
-    omega_m = (M_f / r_w) * v
+        omega_m = (M_f / r_w) * v
     """
-    return (M_f / r_w) * v
+    return (M_f / r_w) * float(v)
 
 
-def traction_force(Tm: float) -> float:
+def available_motor_torque(v: float) -> float:
     """
-    Fuerza motriz equivalente [N] producida por el torque del motor.
+    Par máximo disponible para la velocidad actual.
 
-    F_m = (M_f / (r_w * eta_t)) * T_m
+    En la región de par constante:
+
+        T_lim = T_m_max
+
+    En la región de potencia constante:
+
+        T_lim = P_m_max / omega_m
     """
-    Tm_sat = saturate_torque(Tm)
-    return (M_f / (r_w * eta_t)) * Tm_sat
+    omega_m = abs(motor_speed(v))
+
+    # Evitar una división entre cero cuando el vehículo
+    # se encuentra detenido.
+    if omega_m <= 1e-9:
+        return T_m_max
+
+    torque_power_limit = P_m_max / omega_m
+
+    return float(
+        min(T_m_max, torque_power_limit)
+    )
 
 
-def torque_from_force(Fm: float) -> float:
+# =========================================================
+# SATURACIONES
+# =========================================================
+def saturate_torque(Tm: float, v: float) -> float:
     """
-    Reconstruye el torque [N·m] a partir de una fuerza motriz [N].
-
-    T_m = (r_w * eta_t / M_f) * F_m
+    Satura el par del motor entre cero y el límite
+    disponible para la velocidad actual.
     """
-    Tm = (r_w * eta_t / M_f) * Fm
-    return saturate_torque(Tm)
+    Tm_limit = available_motor_torque(v)
+
+    return float(
+        np.clip(Tm, T_m_min, Tm_limit)
+    )
+
+
+def saturate_brake(Fb: float) -> float:
+    """
+    Satura la fuerza de frenado dentro de sus
+    límites físicos.
+    """
+    return float(
+        np.clip(Fb, F_b_min, F_b_max)
+    )
+
+
+# =========================================================
+# FUERZA MOTRIZ Y PAR DEL MOTOR
+# =========================================================
+def traction_force(Tm: float, v: float) -> float:
+    """
+    Fuerza motriz transmitida a las ruedas [N].
+
+        F_m = (M_f * eta_t / r_w) * T_m
+
+    El par se satura considerando tanto su límite
+    máximo como la potencia disponible.
+    """
+    Tm_sat = saturate_torque(Tm, v)
+
+    return (
+        M_f
+        * eta_t
+        / r_w
+        * Tm_sat
+    )
+
+
+def torque_from_force(Fm: float, v: float) -> float:
+    """
+    Par requerido para generar una fuerza motriz [N·m].
+
+        T_m = (r_w / (M_f * eta_t)) * F_m
+    """
+    Tm_requested = (
+        r_w
+        / (M_f * eta_t)
+        * float(Fm)
+    )
+
+    return saturate_torque(
+        Tm_requested,
+        v,
+    )
 
 
 # =========================================================
@@ -78,141 +138,238 @@ def aerodynamic_drag(v: float) -> float:
     """
     Fuerza de arrastre aerodinámico [N].
 
-    F_d = 0.5 * rho * A_bus * c_a * v^2
+        F_d = 0.5 * rho * A_bus * c_a * v^2
     """
-    return 0.5 * rho * A_bus * c_a * v**2
+    return (
+        0.5
+        * rho
+        * A_bus
+        * c_a
+        * float(v)**2
+    )
 
 
-def rolling_gravity_force(s: float, theta_func) -> float:
+def rolling_gravity_force(
+    s: float,
+    theta_func,
+) -> float:
     """
-    Fuerza que agrupa rodadura y efecto gravitacional [N].
+    Fuerza nominal que agrupa el efecto gravitacional
+    y la resistencia a la rodadura [N].
 
-    F_r = m*g*(sin(theta(s)) + c_r*cos(theta(s)))
+        F_r = m*g*(sin(theta(s)) + c_r*cos(theta(s)))
+
+    Se utiliza la masa nominal m=15000 kg.
+    """
+    th = float(theta_func(s))
+
+    return (
+        m
+        * g
+        * (
+            np.sin(th)
+            + c_r * np.cos(th)
+        )
+    )
+
+
+# =========================================================
+# DISTRIBUCIÓN DE LA FUERZA LONGITUDINAL
+# =========================================================
+def split_longitudinal_force(
+    Fu_requested: float,
+) -> tuple[float, float]:
+    """
+    Separa una fuerza longitudinal deseada en:
+
+    - fuerza motriz solicitada F_m;
+    - fuerza de frenado F_b.
+
+    Si Fu_requested >= 0:
+        se aplica tracción y no se aplica frenado.
+
+    Si Fu_requested < 0:
+        se aplica frenado y no se aplica tracción.
+    """
+    if Fu_requested >= 0.0:
+        Fm_requested = float(Fu_requested)
+        Fb = 0.0
+    else:
+        Fm_requested = 0.0
+        Fb = float(-Fu_requested)
+
+    Fb = saturate_brake(Fb)
+
+    return Fm_requested, Fb
+
+
+def torque_brake_from_u(
+    u: float,
+    v: float,
+) -> tuple[float, float, float]:
+    """
+    Convierte la fuerza longitudinal neta deseada
+    en las acciones físicas de los actuadores.
 
     Parámetros
     ----------
-    s : float
-        Posición longitudinal [m]
-    theta_func : callable
-        Función que recibe s y devuelve theta(s) en radianes
+    u : float
+        Fuerza longitudinal neta deseada [N].
+    v : float
+        Velocidad actual del autobús [m/s].
+
+    Retorna
+    -------
+    Fm : float
+        Fuerza motriz realmente disponible [N].
+    Fb : float
+        Fuerza de frenado aplicada [N].
+    Tm : float
+        Par del motor realmente disponible [N·m].
     """
-    th = float(theta_func(s))
-    return m * g * (np.sin(th) + c_r * np.cos(th))
+    Fm_requested, Fb = split_longitudinal_force(u)
 
+    # Convertir la fuerza solicitada en par y aplicar
+    # los límites de par y potencia.
+    Tm = torque_from_force(
+        Fm_requested,
+        v,
+    )
 
-# =========================================================
-# ENTRADA LONGITUDINAL NETA
-# =========================================================
-def split_longitudinal_force(u: float) -> tuple[float, float]:
-    """
-    Separa una fuerza longitudinal neta u en:
-    - fuerza motriz F_m
-    - fuerza de frenado F_b
+    # Reconstruir la fuerza realmente disponible después
+    # de aplicar las saturaciones.
+    Fm = traction_force(
+        Tm,
+        v,
+    )
 
-    Regla:
-    - si u >= 0: hay tracción, no frenado
-    - si u < 0 : hay frenado, no tracción
-    """
-    if u >= 0.0:
-        Fm = float(u)
-        Fb = 0.0
-    else:
-        Fm = 0.0
-        Fb = float(-u)
-
-    Fb = saturate_brake(Fb)
-    return Fm, Fb
-
-
-def torque_brake_from_u(u: float) -> tuple[float, float, float]:
-    """
-    A partir de una fuerza longitudinal neta u [N], calcula:
-    - F_m [N]
-    - F_b [N]
-    - T_m [N·m]
-
-    Útil para reconstruir actuadores a partir de una referencia longitudinal.
-    """
-    Fm, Fb = split_longitudinal_force(u)
-    Tm = torque_from_force(Fm)
-    Fm = traction_force(Tm)  # recalcular por si hubo saturación
     return Fm, Fb, Tm
 
 
 # =========================================================
-# DINÁMICA DEL AUTOBÚS
+# DINÁMICA DEL AUTOBÚS CON MASA NOMINAL
 # =========================================================
-def bus_dynamics_open_loop(x: np.ndarray, Tm: float, Fb: float, theta_func):
+def bus_dynamics_open_loop(
+    x: np.ndarray,
+    Tm: float,
+    Fb: float,
+    theta_func,
+):
     """
-    Dinámica longitudinal del autobús en lazo abierto.
+    Dinámica longitudinal del autobús con masa nominal.
 
     Estados
     -------
     x = [s, v]
-        s : posición [m]
-        v : velocidad [m/s]
-
-    Entradas
-    --------
-    Tm : float
-        Torque del motor [N·m]
-    Fb : float
-        Fuerza de frenado [N]
-    theta_func : callable
-        Función theta(s) [rad]
 
     Modelo
     ------
-    s_dot = v
+        ds/dt = v
 
-    m*v_dot = F_m - F_b - F_d - F_r
+        m*dv/dt = F_m - F_b - F_d - F_r
     """
-    s, v = x
+    s = float(x[0])
+    v = float(x[1])
 
-    Tm_sat = saturate_torque(Tm)
     Fb_sat = saturate_brake(Fb)
 
-    Fm = traction_force(Tm_sat)
+    # traction_force aplica las restricciones de par
+    # y potencia utilizando la velocidad actual.
+    Fm = traction_force(
+        Tm,
+        v,
+    )
+
     Fd = aerodynamic_drag(v)
-    Fr = rolling_gravity_force(s, theta_func)
+
+    Fr = rolling_gravity_force(
+        s,
+        theta_func,
+    )
 
     dsdt = v
-    dvdt = (Fm - Fb_sat - Fd - Fr) / m
 
-    return np.array([dsdt, dvdt], dtype=float), Fm, Fd, Fr
+    dvdt = (
+        Fm
+        - Fb_sat
+        - Fd
+        - Fr
+    ) / m
+
+    dx = np.array(
+        [dsdt, dvdt],
+        dtype=float,
+    )
+
+    return dx, Fm, Fd, Fr
 
 
 # =========================================================
 # INTEGRADORES NUMÉRICOS
 # =========================================================
-def euler_step(x: np.ndarray, dx: np.ndarray, dt: float) -> np.ndarray:
+def euler_step(
+    x: np.ndarray,
+    dx: np.ndarray,
+    dt: float,
+) -> np.ndarray:
     """
-    Un paso de integración Euler explícito.
+    Realiza un paso de integración mediante
+    Euler explícito.
     """
     x_next = x + dt * dx
 
-    # Evitar velocidad negativa numérica
+    # Evitar velocidades negativas causadas por
+    # la integración numérica.
     if x_next[1] < 0.0:
         x_next[1] = 0.0
 
     return x_next
 
 
-def rk4_step(x: np.ndarray, dt: float, dynamics_func, *args):
+def rk4_step(
+    x: np.ndarray,
+    dt: float,
+    dynamics_func,
+    *args,
+) -> np.ndarray:
     """
-    Un paso de integración Runge-Kutta de orden 4.
-    dynamics_func debe retornar:
-        dx, ...
-    y solo se toma dx para integrar.
+    Realiza un paso de integración mediante el
+    método de Runge-Kutta de cuarto orden.
+
+    dynamics_func debe retornar primero la derivada
+    del estado.
     """
-    k1 = dynamics_func(x, *args)[0]
-    k2 = dynamics_func(x + 0.5 * dt * k1, *args)[0]
-    k3 = dynamics_func(x + 0.5 * dt * k2, *args)[0]
-    k4 = dynamics_func(x + dt * k3, *args)[0]
+    k1 = dynamics_func(
+        x,
+        *args,
+    )[0]
 
-    x_next = x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+    k2 = dynamics_func(
+        x + 0.5 * dt * k1,
+        *args,
+    )[0]
 
-    # Evitar velocidad negativa numérica
+    k3 = dynamics_func(
+        x + 0.5 * dt * k2,
+        *args,
+    )[0]
+
+    k4 = dynamics_func(
+        x + dt * k3,
+        *args,
+    )[0]
+
+    x_next = x + (
+        dt / 6.0
+    ) * (
+        k1
+        + 2.0 * k2
+        + 2.0 * k3
+        + k4
+    )
+
+    # Evitar velocidades negativas causadas por
+    # la integración numérica.
     if x_next[1] < 0.0:
         x_next[1] = 0.0
 
